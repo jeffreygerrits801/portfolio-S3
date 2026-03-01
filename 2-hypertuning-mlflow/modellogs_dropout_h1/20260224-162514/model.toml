@@ -1,0 +1,17 @@
+[model]
+training = true
+in_channels = 1
+input_size = [32, 1, 28, 28]
+filters = 32
+units1 = 128
+units2 = 64
+dropout_p = 0.2
+
+[types]
+training = "bool"
+in_channels = "int"
+input_size = "tuple"
+filters = "int"
+units1 = "int"
+units2 = "int"
+dropout_p = "float"
