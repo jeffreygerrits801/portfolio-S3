@@ -6,222 +6,220 @@ import torch
 import torch.nn as nn
 from filelock import FileLock
 from loguru import logger
-from mltrainer import ReportTypes, Trainer, TrainerSettings, metrics
-from ray import tune
+from ray import train as ray_train, tune
 from ray.tune import CLIReporter
-from ray.tune.search.hyperopt import HyperOptSearch
 from ray.tune.schedulers import AsyncHyperBandScheduler
-from torchvision import transforms
-import torchvision
-from torchvision.models import ResNet18_Weights
-
-from datetime import datetime
-
-NUM_SAMPLES = 1
-MAX_EPOCHS = 10
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 
 
-class AugmentPreprocessor:
-    def __init__(self, transform):
-        self.transform = transform
-
-    def __call__(self, batch: list[tuple]) -> tuple[torch.Tensor, torch.Tensor]:
-        X, y = zip(*batch)
-        X = [self.transform(x) for x in X]
-        return torch.stack(X), torch.stack(y).long().view(-1)
+MAX_EPOCHS = 8
+BATCH_SIZE = 32
+IMAGE_SIZE = 128
+NUM_CLASSES = 102
 
 
-def _freeze_all(model: nn.Module) -> None:
-    for _, param in model.named_parameters():
-        param.requires_grad = False
+class SmallCNN(nn.Module):
+    def __init__(self, base_channels: int = 32, dropout: float = 0.2):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Dropout(dropout),
+            nn.Linear(base_channels * 4, NUM_CLASSES),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
 
 
-def _unfreeze_head(model: nn.Module) -> None:
-    # resnet last layer is .fc
-    for _, param in model.fc.named_parameters():  # type: ignore[attr-defined]
-        param.requires_grad = True
+def get_dataloaders(data_dir: Path):
+    transform_train = transforms.Compose([
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+    ])
+
+    transform_eval = transforms.Compose([
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.ToTensor(),
+    ])
+
+    with FileLock(str(data_dir / ".lock")):
+        train_dataset = datasets.Flowers102(
+            root=str(data_dir),
+            split="train",
+            download=True,
+            transform=transform_train,
+        )
+
+        valid_dataset = datasets.Flowers102(
+            root=str(data_dir),
+            split="val",
+            download=True,
+            transform=transform_eval,
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=0,
+    )
+
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=2,
+    )
+
+    return train_loader, valid_loader
 
 
-def _maybe_unfreeze_layer4(model: nn.Module, enabled: bool) -> None:
-    if not enabled:
-        return
-    for _, param in model.layer4.named_parameters():  # type: ignore[attr-defined]
-        param.requires_grad = True
+def evaluate(model, dataloader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for images, labels in dataloader:
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            total_loss += loss.item() * images.size(0)
+            preds = outputs.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+    avg_loss = total_loss / total
+    accuracy = correct / total
+    return avg_loss, accuracy
 
 
 def train(config: Dict):
-    """
-    The train function should receive a config file, which is a Dict.
-    ray will modify the values inside the config before it is passed to the train function.
-    """
-    from mads_datasets import DatasetFactoryProvider, DatasetType
+    data_dir = Path(config["data_dir"])
 
-    data_dir = Path(config.pop("data_dir")).resolve()
+    train_loader, valid_loader = get_dataloaders(data_dir)
 
-    flowersfactory = DatasetFactoryProvider.create_factory(DatasetType.FLOWERS)
-
-    # Make images bigger, because we crop to 224 later
-    flowersfactory.settings.img_size = (500, 500)
-
-    # Data augmentation + resnet normalization
-    data_transforms = {
-        "train": transforms.Compose(
-            [
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ]
-        ),
-        "val": transforms.Compose(
-            [
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ]
-        ),
-    }
-
-    trainprocessor = AugmentPreprocessor(data_transforms["train"])
-    validprocessor = AugmentPreprocessor(data_transforms["val"])
-
-    with FileLock(str(data_dir / ".lock")):
-        streamers = flowersfactory.create_datastreamer(batchsize=int(config["batchsize"]))
-        train_stream = streamers["train"]
-        valid_stream = streamers["valid"]
-
-    # Different preprocessors for train and validation
-    train_stream.preprocessor = trainprocessor
-    valid_stream.preprocessor = validprocessor
-
-    # Metric + model
-    accuracy = metrics.Accuracy()
-
-    # Build pretrained ResNet18
-    resnet = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
-
-    # Swap head to match flowers classes (default flowers is 5)
-    output_size = int(config["output_size"])
-    in_features = resnet.fc.in_features  # type: ignore[attr-defined]
-
-    # Minimal head or a small MLP head
-    head_hidden = int(config["head_hidden"])
-    head_dropout = float(config["head_dropout"])
-
-    if head_hidden > 0:
-        resnet.fc = nn.Sequential(  # type: ignore[attr-defined]
-            nn.Linear(in_features, head_hidden),
-            nn.ReLU(),
-            nn.Dropout(head_dropout),
-            nn.Linear(head_hidden, output_size),
-        )
-    else:
-        resnet.fc = nn.Sequential(  # type: ignore[attr-defined]
-            nn.Linear(in_features, output_size),
-        )
-
-    # Freeze backbone, train only head (optionally unfreeze last block)
-    _freeze_all(resnet)
-    _unfreeze_head(resnet)
-    _maybe_unfreeze_layer4(resnet, enabled=bool(config["unfreeze_layer4"]))
-
-    trainersettings = TrainerSettings(
-        epochs=MAX_EPOCHS,
-        metrics=[accuracy],
-        logdir=Path("."),
-        train_steps=len(train_stream),  # type: ignore
-        valid_steps=len(valid_stream),  # type: ignore
-        reporttypes=[ReportTypes.RAY],
-        scheduler_kwargs={"factor": 0.5, "patience": 2},
-        earlystop_kwargs=None,
-    )
-
-    # Device selection (keep same style)
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
     else:
-        device = "cpu"  # type: ignore
+        device = torch.device("cpu")
 
-    logger.info(f"Using {device}")
-    if device != "cpu":
-        logger.warning(f"using acceleration with {device}. Check if it actually speeds up!")
+    logger.info(f"Using device: {device}")
 
-    # Optimizer settings from config
-    lr = float(config["lr"])
-    weight_decay = float(config["weight_decay"])
+    model = SmallCNN(
+        base_channels=config["base_channels"],
+        dropout=config["dropout"],
+    ).to(device)
 
-    trainer = Trainer(
-        model=resnet,
-        settings=trainersettings,
-        loss_fn=torch.nn.CrossEntropyLoss(),
-        optimizer=torch.optim.AdamW,  # type: ignore
-        traindataloader=train_stream.stream(),
-        validdataloader=valid_stream.stream(),
-        scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau,
-        device=str(device),
-        optimizer_kwargs={"lr": lr, "weight_decay": weight_decay},
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
+
+    for epoch in range(MAX_EPOCHS):
+        model.train()
+        running_loss = 0.0
+        total_train = 0
+        correct_train = 0
+
+        for images, labels in train_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * images.size(0)
+            preds = outputs.argmax(dim=1)
+            correct_train += (preds == labels).sum().item()
+            total_train += labels.size(0)
+
+        train_loss = running_loss / total_train
+        train_acc = correct_train / total_train
+
+        val_loss, val_acc = evaluate(model, valid_loader, criterion, device)
+
+        ray_train.report(
+            {
+            "train_loss": train_loss,
+            "train_accuracy": train_acc,
+            "val_loss": val_loss,
+            "val_accuracy": val_acc,
+            "epoch": epoch + 1,
+            }
     )
-
-    trainer.loop()
 
 
 if __name__ == "__main__":
     ray.init()
 
     data_dir = Path("data/raw/flowers").resolve()
-    if not data_dir.exists():
-        data_dir.mkdir(parents=True)
-        logger.info(f"Created {data_dir}")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Using data directory: {data_dir}")
 
-    tune_dir = Path("logs/ray").resolve()
-    search = HyperOptSearch()
-    scheduler = AsyncHyperBandScheduler(
-        time_attr="training_iteration",
-        grace_period=1,
-        reduction_factor=3,
-        max_t=MAX_EPOCHS,
-    )
+    tune_dir = Path("logs/ray_flowers").resolve()
+    tune_dir.mkdir(parents=True, exist_ok=True)
 
     config = {
-        # data
-        "data_dir": data_dir,
-        "batchsize": 32,
-        "output_size": 5,
-
-        # head / finetuning knobs (later hypotheses will drive these)
-        "head_hidden": 128,
-        "head_dropout": 0.0,
-        "unfreeze_layer4": tune.choice([False, True]),
-
-        # optimization
-        "lr": tune.loguniform(1e-5, 3e-3),
-        "weight_decay": 1e-4,
+        "data_dir": str(data_dir),
+        "lr": tune.grid_search([1e-4, 3e-4, 1e-3, 3e-3]),
+        "base_channels": tune.grid_search([16, 32, 64, 96]),
+        "dropout": 0.2,
     }
 
-    reporter = CLIReporter()
-    reporter.add_metric_column("Accuracy")
+    reporter = CLIReporter(
+        metric_columns=[
+            "val_loss",
+            "val_accuracy",
+            "train_loss",
+            "train_accuracy",
+            "training_iteration",
+        ]
+    )
 
     analysis = tune.run(
         train,
         config=config,
-        metric="test_loss",
+        metric="val_loss",
         mode="min",
         progress_reporter=reporter,
         storage_path=str(tune_dir),
-        num_samples=NUM_SAMPLES,
-        search_alg=search,
-        scheduler=scheduler,
         verbose=1,
     )
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outfile = f"logs/ray/{timestamp}.csv"
-
-    df = analysis.results_df
-    df.to_csv(outfile, index=False)
-
-    print(f"Saved results to {outfile}")
-    print(df.columns)
+    best_trial = analysis.get_best_trial(metric="val_loss", mode="min", scope="last")
+    print("\nBest trial config:")
+    print(best_trial.config)
+    print("Best trial final validation loss:")
+    print(best_trial.last_result["val_loss"])
+    print("Best trial final validation accuracy:")
+    print(best_trial.last_result["val_accuracy"])
 
     ray.shutdown()
