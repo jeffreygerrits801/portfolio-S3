@@ -13,35 +13,36 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 
-MAX_EPOCHS = 8
+MAX_EPOCHS = 6
 BATCH_SIZE = 32
-IMAGE_SIZE = 128
+IMAGE_SIZE = 96
 NUM_CLASSES = 102
 
 
 class SmallCNN(nn.Module):
-    def __init__(self, base_channels: int = 32, dropout: float = 0.2):
+    def __init__(self, base_channels: int = 32, num_layers: int = 3, dropout: float = 0.2):
         super().__init__()
 
-        self.features = nn.Sequential(
-            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+        layers = []
+        in_channels = 3
+        channels = base_channels
 
-            nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+        for i in range(num_layers):
+            layers.append(nn.Conv2d(in_channels, channels, kernel_size=3, padding=1))
+            layers.append(nn.BatchNorm2d(channels))
+            layers.append(nn.ReLU())
+            layers.append(nn.MaxPool2d(2))
 
-            nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
+            in_channels = channels
+            channels *= 2
+
+        self.features = nn.Sequential(*layers)
 
         self.classifier = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
             nn.Dropout(dropout),
-            nn.Linear(base_channels * 4, NUM_CLASSES),
+            nn.Linear(in_channels, NUM_CLASSES),
         )
 
     def forward(self, x):
@@ -134,6 +135,7 @@ def train(config: Dict):
 
     model = SmallCNN(
         base_channels=config["base_channels"],
+        num_layers=config["num_layers"],
         dropout=config["dropout"],
     ).to(device)
 
@@ -189,8 +191,9 @@ if __name__ == "__main__":
 
     config = {
         "data_dir": str(data_dir),
-        "lr": tune.grid_search([1e-4, 3e-4, 1e-3, 3e-3]),
-        "base_channels": tune.grid_search([16, 32, 64, 96]),
+        "lr": tune.grid_search([3e-4, 1e-3]),
+        "base_channels": tune.grid_search([32, 64, 128]),
+        "num_layers": tune.grid_search([2, 3, 4]),
         "dropout": 0.2,
     }
 
