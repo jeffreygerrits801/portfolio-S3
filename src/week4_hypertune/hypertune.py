@@ -8,14 +8,13 @@ from filelock import FileLock
 from loguru import logger
 from ray import train as ray_train, tune
 from ray.tune import CLIReporter
-from ray.tune.schedulers import AsyncHyperBandScheduler
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 
-MAX_EPOCHS = 6
+MAX_EPOCHS = 10
 BATCH_SIZE = 32
-IMAGE_SIZE = 96
+IMAGE_SIZE = 128
 NUM_CLASSES = 102
 
 
@@ -27,7 +26,7 @@ class SmallCNN(nn.Module):
         in_channels = 3
         channels = base_channels
 
-        for i in range(num_layers):
+        for _ in range(num_layers):
             layers.append(nn.Conv2d(in_channels, channels, kernel_size=3, padding=1))
             layers.append(nn.BatchNorm2d(channels))
             layers.append(nn.ReLU())
@@ -89,7 +88,7 @@ def get_dataloaders(data_dir: Path):
         valid_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
     )
 
     return train_loader, valid_loader
@@ -170,13 +169,13 @@ def train(config: Dict):
 
         ray_train.report(
             {
-            "train_loss": train_loss,
-            "train_accuracy": train_acc,
-            "val_loss": val_loss,
-            "val_accuracy": val_acc,
-            "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "train_accuracy": train_acc,
+                "val_loss": val_loss,
+                "val_accuracy": val_acc,
+                "epoch": epoch + 1,
             }
-    )
+        )
 
 
 if __name__ == "__main__":
@@ -192,9 +191,9 @@ if __name__ == "__main__":
     config = {
         "data_dir": str(data_dir),
         "lr": tune.grid_search([3e-4, 1e-3]),
-        "base_channels": tune.grid_search([32, 64, 128]),
-        "num_layers": tune.grid_search([2, 3, 4]),
-        "dropout": 0.2,
+        "base_channels": 64,
+        "num_layers": tune.grid_search(range(4, 7)),
+        "dropout": tune.grid_search([0.1, 0.3]),
     }
 
     reporter = CLIReporter(
