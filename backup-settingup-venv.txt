@@ -1,0 +1,4 @@
+Use the following commands
+
+cd ~/projects/portfolio-S3
+uv sync

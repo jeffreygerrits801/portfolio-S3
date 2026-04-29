@@ -1,0 +1,7 @@
+services:
+  sallands-app:
+    build: .
+    container_name: sallands-app
+    ports:
+      - "80:80"
+    restart: unless-stopped

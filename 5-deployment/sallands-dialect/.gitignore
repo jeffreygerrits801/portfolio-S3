@@ -1,0 +1,6 @@
+artefacts/*
+assets/*
+!**/.gitkeep
+**/logs
+Dockerfile
+Makefile
