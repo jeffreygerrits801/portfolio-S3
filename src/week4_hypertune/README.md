@@ -11,6 +11,8 @@ In the current situation it is a part of the portfolio-S3 folder and therefore n
 
 Alltough this is not a production-like set-up, following the tutorial was still a very useful experience. 
 
+** Update: ** After the deployment assignment it became a lot more clear how to deal with different .venv's and packages while working on a VM. With this new information i would not have set up the week 4 package like this. Due to time concerns i did not change the current set-up, but is was a nice learning experience tough. 
+
 # Structure
 
 ```
@@ -32,5 +34,5 @@ portfolio-S3/         # Project root
 
 # Results
 
-1.  **[Hyperparameter ray- PDF - Assignment 4](.../4-hypertuning-ray/DL-portfolioassignment-4-Ray-Jeffrey-Gerrits-15-03-2025.pdf)**
+1.  **[Hyperparameter ray- PDF - Assignment 4](../../4-hypertuning-ray/DL-portfolioassignment-4-Ray-Jeffrey-Gerrits-15-03-2025.pdf)**
     * Portfolio assignment 4
