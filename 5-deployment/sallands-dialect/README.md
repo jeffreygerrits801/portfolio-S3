@@ -1,14 +1,16 @@
 # De Sallandse woordengenerator
 
 ## Summary
+
+### Run it on the Surf VM
 To run ‘de Sallandse taalgenerator’ on the existing Surf VM, execute the following steps:
 -	Start up the Surf VM → UOS3JGerrits7  
 -	Run `-- cd /home/jgerrits/projects/portfolio-S3/5-deployment/sallands-dialect` and `--docker compose up -d`
 -	Go to: http://145.38.204.202/ 
 -   Stop the container with `--docker compose down`
 
-
-To run it on any other machine, clone this specific folder of the Git repo:
+### Run it on another machine
+To run it on any other machine (with Docker and Docker compose installed), clone the specific folder of this project. Git is used for convenience to easily retrieve the project on another machine:
 
 -   Clone this Git repository
 ```bash
@@ -20,7 +22,7 @@ git checkout
 cd  5-deployment/sallands-dialect
 ```
 -   Run `docker compose up -d`
--   Open the application in your browser: http://<your-vm-ip>/
+-   Open the application in a browser.
 -   To stop the application: `docker compose down`
 
 
