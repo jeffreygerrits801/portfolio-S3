@@ -22,9 +22,10 @@ This portfolio contains a summary of my work, including machine learning noteboo
     * Deployment of a trained model for 'De Sallandse woordengenerator'
     * Screenshots of the application can be found [here](./5-deployment/screenshots-assignment/).
 
-1.  **[TBA Hackathon](./6-hackathon/project_cuddlefish.md)**
-    * Unknown - Scheduled May 17
-    * Reschudeled to the June 8
+1.  **[TBA Hackathon](./6-hackathon/)**
+    * June 8 Kadaster challenge
+    * Short recap
+    * Presentation group 2
 1.  **[Ethics portfolio](./7-ethics/)**
     * Here you'll find the reports of the Ethics assignments, which also have been sent to teacher Sjors Goossens.
 
